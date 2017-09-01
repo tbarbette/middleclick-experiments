@@ -1,0 +1,435 @@
+//####################
+// Testie configuraton
+//####################
+%info
+Firewall test
+
+Use click-dpdk+vanilla for vanilla, as the DPDK assignment is used even if DPDK itself is not
+
+%config
+require_tags={dpdk}
+
+//Graph title
+title=L3 Firewall
+timeout=30
+
+//Axis name
+var_names={LENGTH:Length,latency:Latency (µs),result-RXTHROUGHPUT:RX Throughput(GBits/s),TOTALTHROUGHPUT:Total Throughput (GBits/s),TXCPU:Transmit CPU,RXCPU:Receive CPU,CPUFREQ:CPU Frequency (MHz)}
+acceptable=0.01
+n_runs=3
+var_serie=LENGTH
+//var_lim={result-RXTHROUGHPUT:0-30}
+var_divider={result-TOTALTHROUGHPUT:1000000000,result-RXTHROUGHPUT:1000000000,CPUFREQ:1000}
+var_log={result-LATENCY}
+var_unit={latency:us}
+var_format={result:%d}
+var_ticks={result-TOTALTHROUGHPUT:1+2+5+10+20+30+40}
+var_ticks+={result-RXTHROUGHPUT:1+2+5+10+20+30+40}
+var_grid={result}
+
+%variables
+GEN_ENDAFTER=32
+
+full:BLOCKING={true,false}
+BLOCKING=false
+iptables:BLOCKING=false
+
+cpufreq:CPUFREQ={1200000, 1400000, 1600000, 1800000, 2000000, 2200000, 2400000}
+-cpufreq:CPUFREQ=1200000
+CPU=2
+middleclick:AGGCACHE=true
+middleclick:BUILDER=1
+middleclick:CACHESIZE=65536
+middleclick:CACHERINGSIZE=8
+
+checksum=true
+
+tunemiddle:BUILDER={0,1}
+tunemiddle:AGGCACHE={true,false}
+//DIRECTION={0,1}
+
+//########################################
+//Script to launch the generator
+//########################################
+%import@client fastclick-replay-dual 0:ip=139.165.0.1 1:ip=10.10.10.1 traceIN=/mnt/traces/201601-1_fullanon_padded.pcap traceOUT=/mnt/traces/201601-2_fullanon_padded.pcap NBUF=5000000 delay=2
+%import@dut cpufreq-script
+
+//%import@client dpdk-bind NIC=0
+//%import@client dpdk-bind NIC=1
+%click,-vanilla:import@dut dpdk-bind NIC=0
+%click,-vanilla:import@dut dpdk-bind NIC=1
+%vanilla:import@dut dpdk-bind NIC=0 DRIVER=i40e
+%vanilla:import@dut dpdk-bind NIC=1 DRIVER=i40e
+%iptables:import@dut dpdk-bind NIC=0 DRIVER=i40e
+%iptables:import@dut dpdk-bind NIC=1 DRIVER=i40e
+
+//############################
+//Scripts to launch local instance
+//All-click based use the same script, while iptables use its own
+//############################
+%file linux.sh
+sudo service fail2ban stop
+
+ethA=${dut:0:ifname}
+ethB=${dut:1:ifname}
+echo "Interfaces are $ethA and $ethB"
+
+sudo ifconfig $ethA up
+sudo ifconfig $ethB up
+
+sleep 1
+
+ethtool -L $ethA combined $CPU
+ethtool -L $ethB combined $CPU
+
+//sudo ethtool -K $ethA tso off
+//sudo ethtool -K $ethA lro off
+//sudo ethtool -K $ethA gso off
+//sudo ethtool -K $ethA gro off
+//sudo ethtool -K $ethB tso off
+//sudo ethtool -K $ethB lro off
+//sudo ethtool -K $ethB gso off
+//sudo ethtool -K $ethB gro off
+
+sleep 1
+
+%vanilla:script@dut sudo=true
+echo "Vanilla script"
+chmod +x linux.sh
+source linux.sh
+
+echo 0 > /proc/sys/net/ipv4/ip_forward
+
+sleep 1
+
+echo "Adding addresses"
+sudo ip addr add 139.164.0.2/16 dev $ethA noprefixroute
+sudo ip addr add 139.165.0.1/16 dev $ethB noprefixroute
+
+sleep 1
+echo "Setting MAC entries"
+sudo ip neighbor add 139.164.0.1 lladdr ${client:0:ifname} dev $ethA nud permanent
+sudo ip neighbor add 139.165.0.2 lladdr ${client:1:ifname} dev $ethB nud permanent
+
+echo "Setting up route in dedicated table"
+sudo ip route flush table 5
+sudo ip route add 139.164.0.1 dev $ethA table 5
+sudo ip route add 139.165.0.2 dev $ethB table 5
+sudo ip route add 139.164.0.0/16 via 139.164.0.1 dev $ethA table 5
+sudo ip route add 139.165.0.0/16 via 139.165.0.2 dev $ethB table 5
+sudo ip route add default dev $ethA table 5
+
+sleep 1
+sudo /home/tom/set_irq_affinityseq.sh $ethA $ethB
+
+sudo iptables -X
+sudo iptables -F
+sudo iptables -F -t nat
+
+sudo ifconfig $ethA up
+sudo ifconfig $ethB up
+
+echo "Launching DUT"
+cat COMMON_CONFIG FIREWALL_CONFIG CLICK_END_CONFIG COMMON_END_CONFIG | click --dpdk -n 4 -l 2-$(( 2 + $CPU - 1 )) --
+
+//############################
+%fastclickbased:script@dut sudo=true
+echo "Fastclick based script"
+echo "Launching DUT"
+cat COMMON_CONFIG FIREWALL_CONFIG CLICK_END_CONFIG COMMON_END_CONFIG | click --dpdk -n 4 -l 0-$(( $CPU - 1 )) --
+
+//############################
+%iptables:script@dut sudo=true autokill=false
+echo "IPtables script"
+chmod +x linux.sh
+source linux.sh
+
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+sleep 1
+
+echo "Adding rule for table"
+sudo ip rule add iif $ethA table 5
+sudo ip rule add iif $ethB table 5
+
+echo "Adding addresses"
+sudo ip addr add 139.164.0.2/16 dev $ethA noprefixroute
+sudo ip addr add 139.165.0.1/16 dev $ethB noprefixroute
+
+sleep 1
+echo "Setting MAC entries"
+sudo ip neighbor add 139.164.0.1 lladdr 3c:fd:fe:9e:5b:60 dev $ethA nud permanent
+sudo ip neighbor add 139.165.0.2 lladdr 3c:fd:fe:9e:5b:61 dev $ethB nud permanent
+
+echo "Setting up route in dedicated table"
+sudo ip route flush table 5
+sudo ip route add 139.164.0.1 dev $ethA table 5
+sudo ip route add 139.165.0.2 dev $ethB table 5
+sudo ip route add 139.164.0.0/16 via 139.164.0.1 dev $ethA table 5
+sudo ip route add 139.165.0.0/16 via 139.165.0.2 dev $ethB table 5
+sudo ip route add default via 139.164.0.1 table 5
+
+sleep 1
+
+sudo /home/tom/set_irq_affinityseq.sh $ethA $ethB
+
+INTERNALNET=139.165.0.0/16
+
+IPT="sudo /sbin/iptables"
+INIF=$ethA
+OUTIF=$ethB
+
+$IPT -X
+$IPT -F
+$IPT -t nat -F
+
+echo "Setting firewall rules"
+. ./FIREWALL
+
+sudo ifconfig $ethA up
+sudo ifconfig $ethB up
+
+//############################
+//Click-based configurations
+//############################
+%file COMMON_CONFIG
+define ($IN ${dut:0:pci})
+define ($INETH ${dut:0:ifname})
+define ($OUT ${dut:1:pci})
+define ($OUTETH ${dut:1:ifname})
+define ($INsrcmac ${dut:0:mac})
+define ($OUTsrcmac ${dut:1:mac})
+define ($INdstmac ${client:0:mac})
+define ($OUTdstmac ${client:1:mac})
+define ($INsrcip 10.2.0.60)
+define ($OUTsrcip 10.2.0.61)
+define ($INdstip 10.2.0.40)
+define ($OUTdstip 10.2.0.41)
+define ($INGW 139.165.0.2)
+define ($OUTGW 139.164.0.1)
+define ($GWINmac ${client:0:mac})
+define ($GWOUTmac ${client:1:mac})
+define ($INTERNALNET 139.165.0.0/16)
+
+elementclass ARPDispatcher {
+    input[0]->Classifier(12/0800,12/0806,-)[0,1,2]=>[0,1,2]output
+}
+
+//#############################
+%file COMMON_END_CONFIG
+Script(print "MAC address :", print $(fdIN/f.mac), print $(fdOUT/f.mac))
+
+//Learn MAC
+FastUDPFlows(RATE 1, LIMIT -1, LENGTH 60, SRCETH $INsrcmac, DSTETH ff:ff:ff:ff:ff:ff, SRCIP $INsrcip, DSTIP $INdstip, FLOWS 1, FLOWSIZE 1) -> MarkMACHeader -> RatedUnqueue(1) -> Print(ADVERTISE) -> tIN
+FastUDPFlows(RATE 1, LIMIT -1, LENGTH 60, SRCETH $OUTsrcmac, DSTETH ff:ff:ff:ff:ff:ff, SRCIP $OUTsrcip, DSTIP $OUTdstip, FLOWS 1, FLOWSIZE 1) -> MarkMACHeader -> RatedUnqueue(1) -> Print(ADVERTISE) ->  tOUT
+
+
+DriverManager(  pause,
+    print "Count : $(avgIN.count)/$(fdIN/f.count) $(avgOUT.count)/$(fdOUT/f.count)",
+    print "Receive rate : $(avgIN.link_rate) $(avgOUT.link_rate)",
+    print "Dropped : $(dropIN.count) $(dropOUT.count)",
+
+    print "Sent : $(tIN.n_sent) $(tOUT.n_sent)",
+    print "Firewalled : $(fwIN.dropped) $(fwOUT.dropped)",
+//      print "Median : $(batchin.median), Avg : $(batchin.average), \nDump : $(batchin.dump)"
+    )
+
+//############################
+%-middleclick,-iptables:file CLICK_END_CONFIG
+    router::LookupIPRouteMP($INTERNALNET $INGW 1,
+                            0/0 $OUTGW 0)
+
+    router[0] -> tdIN
+    router[1] -> tdOUT
+
+fdIN -> MarkMACHeader-> dispIN [0] -> Strip(14) -> chIN :: CheckIPHeader(CHECKSUM $checksum) -> fwIN [0] -> Unstrip(14) -> avgIN :: AverageCounter ->  router
+dispIN[1] -> passIN :: AverageCounter -> Discard
+dispIN[2] -> Print("UNKNOWN INPUT TRAFFIC") -> Discard()
+fwIN[1] -> dropIN :: AverageCounter -> Discard
+
+fdOUT -> MarkMACHeader-> dispOUT[0] -> Strip(14) -> chOUT :: CheckIPHeader(CHECKSUM $checksum) -> fwOUT [0] -> Unstrip(14) -> avgOUT :: AverageCounter() -> router
+dispOUT[1] -> passOUT :: AverageCounter -> Discard
+dispOUT[2] -> Print("UNKNOWN OUTPUT TRAFFIC") -> Discard()
+fwOUT[1] -> dropOUT :: AverageCounter -> Discard
+
+chIN[1] -> Print("Bad IP") -> Discard
+chOUT[1] -> Print("Bad IP") -> Discard
+
+//############################
+//Per-repository click configurations
+//############################
+%vanilla:file FIREWALL_CONFIG
+
+fdIN :: { FromDevice($INETH, METHOD PCAP) -> [0] }
+tdIN :: EtherRewrite($INsrcmac, $GWINmac)
+-> tIN :: Queue -> ToDevice($INETH, METHOD PCAP)
+fdOUT ::{ FromDevice($OUTETH) -> [0] }
+tdOUT :: EtherRewrite($OUTsrcmac, $GWOUTmac)
+-> tOUT :: Queue -> ToDevice($OUTETH, METHOD PCAP)
+
+StaticThreadSched(fdIN 0 , tdIN 0)
+StaticThreadSched(fdOUT 1,  tdOUT 1)
+
+/**
+ * Output 0 : IP
+ * Output 1 : Passthrough firewall
+ * Output 2 : Unknow traffic
+ */
+
+    dispIN :: ARPDispatcher
+    dispOUT :: ARPDispatcher
+
+    AddressInfo(INTERNALNET $INTERNALNET)
+
+    fwIN ::IPFilter(drop src INTERNALNET,
+        allow icmp,
+        allow tcp && dst port http,
+        allow tcp && dst port https,
+        allow tcp && dst port ssh,
+        allow tcp && dst port ftp,
+        allow tcp && src port http,
+        allow tcp && src port https,
+        allow tcp && src port ssh,
+        allow tcp && src port ftp,
+        allow udp && dst port dns,
+		allow udp && src port dns,
+		drop all)
+
+    fwOUT::IPFilter(allow src INTERNALNET,
+    allow icmp,
+    drop all)
+
+//############################
+%fastclick:file FIREWALL_CONFIG
+fdIN :: { f :: FromDPDKDevice($IN, VERBOSE 99) -> [0] }
+tdIN :: EtherRewrite($INsrcmac, $GWINmac)
+-> tIN :: ToDPDKDevice($IN, BLOCKING $BLOCKING, VERBOSE 99)
+fdOUT :: { f :: FromDPDKDevice($OUT, VERBOSE 99) -> [0] }
+tdOUT :: EtherRewrite($OUTsrcmac, $GWOUTmac)
+-> tOUT :: ToDPDKDevice($OUT, BLOCKING $BLOCKING, VERBOSE 99)
+
+
+dispIN :: ARPDispatcher
+dispOUT :: ARPDispatcher
+
+AddressInfo(INTERNALNET $INTERNALNET)
+
+fwIN ::IPFilter(1 src INTERNALNET,
+    allow icmp,
+    allow tcp && dst port http,
+    allow tcp && dst port https,
+    allow tcp && dst port ssh,
+    allow tcp && dst port ftp,
+    allow tcp && src port http,
+    allow tcp && src port https,
+    allow tcp && src port ssh,
+    allow tcp && src port ftp,
+    allow udp && dst port dns,
+    allow udp && src port dns,
+    1 all)
+
+fwOUT::IPFilter(allow src INTERNALNET,
+    allow icmp,
+    1 all)
+
+//############################
+%middleclick,-nousertime:file CLICK_END_CONFIG
+TSCClock(INSTALL true, NOWAIT true);
+JiffieClock();
+
+%middleclick:file FIREWALL_CONFIG
+
+define($aggcache $AGGCACHE)
+define($builder $BUILDER)
+fdIN :: { f :: FromDPDKDevice($IN, VERBOSE 99, RSS_AGGREGATE $aggcache) -> MarkMACHeader -> [0] }
+tdIN :: FlowUnstrip(14) -> EtherRewrite($INsrcmac, $GWINmac)
+-> tIN :: ToDPDKDevice($IN, VERBOSE 99)
+fdOUT ::{ f :: FromDPDKDevice($OUT, VERBOSE 99, RSS_AGGREGATE $aggcache) -> MarkMACHeader -> [0] }
+tdOUT :: FlowUnstrip(14) -> EtherRewrite($OUTsrcmac, $GWOUTmac)
+-> tOUT :: ToDPDKDevice($OUT, VERBOSE 99)
+
+/**
+ * Output 0 : IP
+ * Output 1 : Passthrough firewall
+ * Output 2 : Unknow traffic
+ */
+elementclass ARPDispatcher {
+	input[0]->FlowDispatcher(
+			12/0800,
+			12/0806,
+			-)[0,1,2]=>[0,1,2]output
+}
+
+dispIN :: ARPDispatcher
+dispOUT :: ARPDispatcher
+
+elementclass FwIN { input -> proto :: FlowDispatcher(   12/8ba5/ffff drop, //Drop internalnet source
+				                    9/01 0, //ICMP
+                                    9/06 1, //TCP
+                                    9/11 2, //UDP
+	                            - drop)
+		proto[0] -> [0]output
+
+        proto[1] -> FlowStrip(20) -> FlowDispatcher(0/01bb 0,
+                                                    0/0016 0,
+                                                    0/0015 0,
+                                                    0/0050 0,
+													2/0050 0,
+                                                    2/01bb 0,
+													2/0016 0,
+                                                    2/0015 0,
+                                                    - drop) -> FlowUnstrip(20) -> [0]output
+        proto[2] -> FlowStrip(20) -> FlowDispatcher(0/0035 0,
+                                                    2/0035 0,
+                                                    - drop) -> FlowUnstrip(20) -> [0]output
+            }
+fwIN :: FwIN()
+
+
+fwOUT::FlowDispatcher(	12/8ba5/ffff 0,
+						9/01 0,
+						- drop)
+
+
+router :: FlowDispatcher(  16/8ba5/ffff 1,
+                           - 0)
+
+router[0] -> tdIN
+router[1] -> tdOUT
+
+
+fdIN -> fcIN :: FlowClassifier(VERBOSE 0, BUILDER $builder, AGGCACHE $aggcache, CACHESIZE $CACHESIZE, CACHERINGSIZE $CACHERINGSIZE) -> dispIN [0] -> FlowStrip(14) -> chIN :: CheckIPHeader(CHECKSUM $checksum) -> fwIN [0] -> avgIN :: AverageCounter() ->  router
+dispIN[1] -> Print("Pass through") -> Discard
+dispIN[2] -> Print("UNKNOWN INPUT TRAFFIC") -> Discard()
+
+fdOUT -> fcOUT :: FlowClassifier(VERBOSE 0, BUILDER $builder, AGGCACHE $aggcache, CACHESIZE $CACHESIZE, CACHERINGSIZE $CACHERINGSIZE) -> dispOUT[0] -> FlowStrip(14) -> chOUT :: CheckIPHeader(CHECKSUM $checksum) -> fwOUT [0] -> avgOUT :: AverageCounter() ->  router
+dispOUT[1] -> Print("Pass through") -> Discard
+dispOUT[2] -> Print("UNKNOWN OUTPUT TRAFFIC") -> Discard()
+
+chIN[1] -> Print("Bad IP") -> Discard
+chOUT[1] -> Print("Bad IP") -> Discard
+
+//####################
+//FIREWALL configurations
+//####################
+%iptables:file FIREWALL
+$IPT -F
+$IPT -A FORWARD -i $INIF --src $INTERNALNET -j DROP
+$IPT -A FORWARD -i $INIF -p icmp -j ACCEPT
+$IPT -A FORWARD -i $INIF -p tcp --dport 80 -j ACCEPT
+$IPT -A FORWARD -i $INIF -p tcp --dport 443 -j ACCEPT
+$IPT -A FORWARD -i $INIF -p tcp --dport 22 -j ACCEPT
+$IPT -A FORWARD -i $INIF -p tcp --dport 21 -j ACCEPT
+$IPT -A FORWARD -i $INIF -p udp --dport 53 -j ACCEPT
+$IPT -A FORWARD -i $INIF -p tcp --sport 80 -j ACCEPT
+$IPT -A FORWARD -i $INIF -p tcp --sport 443 -j ACCEPT
+$IPT -A FORWARD -i $INIF -p tcp --sport 22 -j ACCEPT
+$IPT -A FORWARD -i $INIF -p tcp --sport 21 -j ACCEPT
+$IPT -A FORWARD -i $INIF -p udp --sport 53 -j ACCEPT
+#conntrack
+#$IPT -A FORWARD -i $INIF -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+$IPT -A FORWARD -i $INIF -j DROP
+
+$IPT -A FORWARD -i $OUTIF --src $INTERNALNET -j ACCEPT
+$IPT -A FORWARD -i $OUTIF -p icmp -j ACCEPT
+$IPT -A FORWARD -i $OUTIF -j DROP

@@ -10,22 +10,27 @@ will use 4 ips as source (10.200.[1-4].5) to send the requests to the HTTP serve
 
 %config
 timeout=60
-var_names={LENGTH:Length,result-THROUGHPUT:Throughput,TXCPU:Transmit CPU,RXCPU:Receive CPU,FREQ:CPU frequency,C:Concurrent connections,BUILDER:Reconstruct batches of Flows,result-LATENCY:Average file download time,result-Receive rate:Receive rate,FSIZE:File size}
-n_retry=1
+var_names={LENGTH:Length,result-THROUGHPUT:Throughput,TXCPU:Transmit CPU,RXCPU:Receive CPU,FREQ:CPU frequency,C:Concurrent connections,BUILDER:Reconstruct batches of Flows,result-LATENCY:Average file download time,result-Receive rate:Receive rate,FSIZE:File size,NC:Number of cores,result-REQUEST:Requests rate,CPU:Number of cores}
+n_retry=0
 acceptable=0.01
 n_runs=3
+tunehaproxy:n_runs=1
+tunemiddle:n_runs=1
 var_serie=LENGTH
-var_log={FSIZE,result-THROUGHPUT,result-LATENCY,result-Receive rate}
-var_unit={result: ,result-LATENCY:ms,FSIZE:kbyte,result-THROUGHPUT:GBits/s,result-PPS:KPackets/s}
+-cpu:var_log={FSIZE,result-LATENCY,result-Receive rate}
+-cpu:var_log_base={result-THROUGHPUT:2}
+var_unit={result: ,result-LATENCY:ms,FSIZE:kbyte,result-THROUGHPUT:GBits/s,result-PPS:KPackets/s,REQUEST:Request/s}
 var_divider={result-THROUGHPUT:125000000,result-LINK:1000000000,result-LATENCY:0.001,result-PPS:1000} //Throughput is brought back to bits
 var_format={result:%d,result-LATENCY:%d}
 var_grid={result-LATENCY,result-THROUGHPUT}
-var_lim={result-THROUGHPUT:0-5}
-var_ticks={result-THROUGHPUT:0+1+2+4+10+20+40}
+-cpu:var_lim={result-THROUGHPUT:0-40}
+cpu:var_lim={result-PPS:0-1000,result-THROUGHPUT:0-10,result-REQUEST:0-1000000}
+-cpu:var_ticks={result-THROUGHPUT:0+1+2+4+10+20+40}
 //graph_result_as_variables={LINK+THROUGHPUT:Receive rate}
 //graph_variable_as_series={Receive rate}
 //graph_combine_results={LINK+THROUGHPUT:Link rate+Payload rate}
 graph_subplot_result={THROUGHPUT+PPS:rate}
+cpu:graph_subplot_result={THROUGHPUT+REQUEST:rate}
 
 %variables
 BLOCKING=false
@@ -34,11 +39,17 @@ none:PATH=
 C=[1*128]
 C=128
 FSIZE=[0*1048576]
-//FSIZE=[1*32768]
+
 th=4
 full:th=[1*16]
-//NC=2
+
 NC=1
+cpu:NC=[1*8]
+cpu:FSIZE=1
+dualsrv:GEN_CONCURRENT=1024 //1024 is now the better with dualsrv
+dualsrv,direct:GEN_CONCURRENT=256
+-dualsrv:GEN_CONCURRENT=128
+tune:GEN_CONCURRENT={128,1024}
 tunemiddle:BUILDER={0,1}
 BUILDER=1
 AGGCACHE=1
@@ -57,9 +68,13 @@ haproxy:MAXCONN=200000
 haproxy:BALANCE=static-rr
 haproxy:SOMAXCONN=200000
 haproxy:SYNBACKLOG=200000
-tunehaproxy:MAXCONN={128,1024,32768,200000}
+tunehaproxy:MAXCONN={1024,32768,200000,4000000}
+tunehaproxy:SOMAXCONN={200000,400000}
 tunehaproxy:BALANCE={roundrobin,static-rr}
 tunehaproxy:FSIZE={8,32,1024}
+%late_variables
+tunehaproxy:SYNBACKLOG=EXPAND( $SOMAXCONN )
+
 
 %middleclick:require
 test "$AGGCACHE" -eq "0" -o "$CACHESIZE" -eq "65536"
@@ -85,6 +100,20 @@ while [ $n -le 1048576 ] ; do
 done
 echo "RESULT 1"
 
+%dualsrv:init@server2
+set -eu
+mkdir -p ${NGINX_ROOT}
+
+touch ${NGINX_ROOT}/bin-0K
+n=1
+while [ $n -le 1048576 ] ; do
+    if [ ! -e ${NGINX_ROOT}/bin-${n}K ] ; then
+        dd if=/dev/urandom of=${NGINX_ROOT}/bin-${n}K bs=1K count=$n
+    fi
+    n=$(echo "$n*2" | bc)
+done
+echo "RESULT 1"
+
 %require
 test $C -ge $th
 
@@ -95,17 +124,44 @@ exit 1
 %late_variables
 FILE_PATH=EXPAND(bin-${FSIZE}K)
 
-%haproxy:import@dut dev_channels NIC=0 N=1 delay=2
-%haproxy:import@dut dev_channels NIC=1 N=1 delay=2
+//%haproxy:import@dut dev_channels NIC=0 N=1 delay=2
+//%haproxy:import@dut dev_channels NIC=1 N=1 delay=2
 %wrk:import@client dev_rate NIC=0 delay=2
+%wrk,dualclient:import@client2 dev_rate NIC=0 delay=2
 %import@server nginx
+%dualsrv:import@server2 nginx
 
 //WRK gen method
-%wrk:import@client wrk HTTP_PORT=80 delay=5
+%-direct,wrk:import@client wrk HTTP_PORT=80 delay=15
+%-direct,dualclient,wrk:import@client2 wrk HTTP_PORT=80 delay=15
+
+//**
+//* DIRECT mode
+//
+%direct:script@client sudo=true autokill=false
+sudo ip addr add 10.100.1.5/24 dev ${self:0:ifname}
+sudo ip addr add 10.100.2.5/24 dev ${self:0:ifname}
+sudo ip addr add 10.100.3.5/24 dev ${self:0:ifname}
+sudo ip addr add 10.100.4.5/24 dev ${self:0:ifname}
+
+%direct,dualclient:script@client2 sudo=true autokill=false
+sudo ip addr add 10.100.5.5/24 dev ${self:0:ifname}
+sudo ip addr add 10.100.6.5/24 dev ${self:0:ifname}
+sudo ip addr add 10.100.7.5/24 dev ${self:0:ifname}
+sudo ip addr add 10.100.8.5/24 dev ${self:0:ifname}
+
+%direct,wrk:import@client wrk WRK_HOST=10.100.1.1 GEN_THREADS=4 delay=10
+%direct,wrk:import@client wrk WRK_HOST=10.100.2.1 GEN_THREADS=4 delay=10
+%direct,wrk:import@client wrk WRK_HOST=10.100.3.1 GEN_THREADS=4 delay=10
+%direct,wrk:import@client wrk WRK_HOST=10.100.4.1 GEN_THREADS=4 delay=10
+%direct,dualclient,wrk:import@client2 wrk WRK_HOST=10.100.5.1 GEN_THREADS=4 delay=10
+%direct,dualclient,wrk:import@client2 wrk WRK_HOST=10.100.6.1 GEN_THREADS=4 delay=10
+%direct,dualclient,wrk:import@client2 wrk WRK_HOST=10.100.7.1 GEN_THREADS=4 delay=10
+%direct,dualclient,wrk:import@client2 wrk WRK_HOST=10.100.8.1 GEN_THREADS=4 delay=10
 
 //Click webgen method
 %webgen:script@client deps=middleclick sudo=true delay=2
-click --dpdk -c 1 -n 4 -- webgen.click
+click --dpdk -l 0-$(( $NC - 1 )) -n 4 -- webgen.click
 
 %webgen:file@client webgen.click
 TSCClock
@@ -137,7 +193,11 @@ DriverManager(
     stop
 )
 
+/**
+ * NIC bindings
+ */
 %wrk:import@client dpdk-bind DRIVER=i40e NIC=0
+%wrk,dualclient:import@client2 dpdk-bind DRIVER=i40e NIC=0
 %webgen:import@client dpdk-bind NIC=0
 %-quadsrv:import@server dpdk-bind DRIVER=i40e NIC=1
 
@@ -145,6 +205,10 @@ DriverManager(
 %quadsrv:import@server dpdk-bind DRIVER=i40e NIC=1
 %quadsrv:import@server dpdk-bind DRIVER=i40e NIC=2
 %quadsrv:import@server dpdk-bind DRIVER=i40e NIC=3
+%quadsrv,dualsrv:import@server2 dpdk-bind DRIVER=i40e NIC=0
+%quadsrv,dualsrv:import@server2 dpdk-bind DRIVER=i40e NIC=1
+%quadsrv,dualsrv:import@server2 dpdk-bind DRIVER=i40e NIC=2
+%quadsrv,dualsrv:import@server2 dpdk-bind DRIVER=i40e NIC=3
 %haproxy:import@dut dpdk-bind DRIVER=i40e NIC=0
 %haproxy:import@dut dpdk-bind DRIVER=i40e NIC=1 delay=1
 %middleclick:import@dut dpdk-bind NIC=0
@@ -152,9 +216,9 @@ DriverManager(
 
 
 //Common ips for dut
-%script@dut autokill=false 0:ip=10.200.0.1 1:ip=10.100.1.1
+%-direct:script@dut autokill=false 0:ip=10.200.0.1 1:ip=10.100.1.1
 
-//Quadsrv is used when the server is another computer with 4 links
+//Quadsrv is used when the server is another computer with 4 links, and not client taking two roles
 %-quadsrv:init@server sudo=true autokill=false 1:ip=10.100.1.2 delay=2
 sudo sysctl -w net.core.somaxconn=262144
 sudo sysctl -w net.ipv4.tcp_max_syn_backlog=3240000
@@ -169,6 +233,7 @@ sudo iptables -F
 sudo iptables -F -t nat
 echo "RESULT 1"
 
+
 %quadsrv:init@server sudo=true autokill=false 0:ip=10.100.1.1 1:ip=10.100.2.1 2:ip=10.100.3.1 3:ip=10.100.4.1 delay=2
 sudo sysctl -w net.core.somaxconn=262144
 sudo sysctl -w net.ipv4.tcp_max_syn_backlog=3240000
@@ -180,7 +245,25 @@ sudo ifconfig ${server:2:ifname} ${server:2:ip} netmask 255.255.255.0
 sudo ifconfig ${server:2:ifname} up
 sudo ifconfig ${server:3:ifname} ${server:3:ip} netmask 255.255.255.0
 sudo ifconfig ${server:3:ifname} up
-//sudo ip addr add 10.100.0.1/24 dev ${server:0:ifname}
+
+sudo iptables -X
+sudo iptables -F
+sudo iptables -F -t nat
+echo "RESULT 1"
+
+//Quadsrv dualsrv means two servers are used to serve HTTP pages
+%quadsrv,dualsrv:init@server2 sudo=true autokill=false 0:ip=10.100.5.1 1:ip=10.100.6.1 2:ip=10.100.7.1 3:ip=10.100.8.1 delay=2
+sudo sysctl -w net.core.somaxconn=262144
+sudo sysctl -w net.ipv4.tcp_max_syn_backlog=3240000
+sudo ifconfig ${server2:0:ifname} ${server2:0:ip} netmask 255.255.255.0
+sudo ifconfig ${server2:0:ifname} up
+sudo ifconfig ${server2:1:ifname} ${server2:1:ip} netmask 255.255.255.0
+sudo ifconfig ${server2:1:ifname} up
+sudo ifconfig ${server2:2:ifname} ${server2:2:ip} netmask 255.255.255.0
+sudo ifconfig ${server2:2:ifname} up
+sudo ifconfig ${server2:3:ifname} ${server2:3:ip} netmask 255.255.255.0
+sudo ifconfig ${server2:3:ifname} up
+
 sudo iptables -X
 sudo iptables -F
 sudo iptables -F -t nat
@@ -192,8 +275,21 @@ echo "RESULT 1"
 sudo ifconfig ${client:0:ifname} 10.200.0.5 netmask 255.255.255.0
 sudo ifconfig ${client:0:ifname} up
 sudo ip route del 10.200.0.0/24 dev ens6f0
-sudo ip route add 10.200.0.5/32 dev ens6f0
-sudo ip route add 10.200.0.0/16 via 10.200.0.5 dev ens6f0
+sudo ip route add 10.200.0.1/32 dev ens6f0
+sudo ip route add 10.200.0.0/16 via 10.200.0.1 dev ens6f0
+sudo iptables -X
+sudo iptables -F
+sudo iptables -F -t nat
+sudo sysctl -w net.core.somaxconn=262144
+sudo sysctl -w net.ipv4.tcp_max_syn_backlog=3240000
+echo "RESULT 1"
+
+%dualclient:init@client2 sudo=true autokill=false 0:ip=10.200.0.10 delay=2
+sudo ifconfig ${client2:0:ifname} 10.200.0.10 netmask 255.255.255.0
+sudo ifconfig ${client2:0:ifname} up
+sudo ip route del 10.200.0.0/24 dev ens6f0
+sudo ip route add 10.200.0.1/32 dev ens6f0
+sudo ip route add 10.200.0.0/16 via 10.200.0.1 dev ens6f0
 sudo iptables -X
 sudo iptables -F
 sudo iptables -F -t nat
@@ -204,10 +300,10 @@ echo "RESULT 1"
 
 
 //#############################
-%middleclick:script@dut sudo=true  0:ip=10.200.0.1 1:ip=10.100.1.1
-click --dpdk -n 4 -l 0-$(( $NC -1 )) -- CONF BUILDER=$BUILDER AGGCACHE=$AGGCACHE CACHESIZE=$CACHESIZE
+%middleclick:script@dut sudo=true  0:ip=10.200.0.1 1:ip=10.100.1.1 delay=2
+cat COMMON CONF END | click --dpdk -n 4 -l 0-$(( $NC -1 )) -- BUILDER=$BUILDER AGGCACHE=$AGGCACHE CACHESIZE=$CACHESIZE
 
-%file@dut CONF
+%file@dut COMMON
 define($IP1 10.200.0.1)
 define($MAC1 ${dut:0:mac})
 define($NET1  10.200.0.0/16)
@@ -222,11 +318,19 @@ define($SERVERIP1 10.100.1.1)
 define($SERVERIP2 10.100.2.1)
 define($SERVERIP3 10.100.3.1)
 define($SERVERIP4 10.100.4.1)
+define($SERVERIP5 10.100.5.1)
+define($SERVERIP6 10.100.6.1)
+define($SERVERIP7 10.100.7.1)
+define($SERVERIP8 10.100.8.1)
 
 define($SIP1 10.100.1.2)
 define($SIP2 10.100.2.2)
 define($SIP3 10.100.3.2)
 define($SIP4 10.100.4.2)
+define($SIP5 10.100.5.2)
+define($SIP6 10.100.6.2)
+define($SIP7 10.100.7.2)
+define($SIP8 10.100.8.2)
 
 //Parameters
 define($rxverbose 99)
@@ -253,41 +357,33 @@ elementclass ARPDispatcher {
 elementclass Receiver { $port, $mac, $ip, $range |
 
     input[0]
-//    -> Print("ARP QUERIER FROM $mac",-1)
     -> arpq :: ARPQuerier($ip, $mac)
-//    -> Print("$mac OUT", -1)
     -> etherOUT :: Null
 
     f :: FromDPDKDevice($port, VERBOSE $rxverbose, PROMISC false, RSS_AGGREGATE $AGGCACHE)
-//    -> Print("FROM $mac",-1)
     -> FlowClassifier(BUILDER $BUILDER, AGGCACHE $AGGCACHE, CACHESIZE $CACHESIZE,VERBOSE 0)
-//    -> stats :: BatchStats()
     -> arpr :: ARPDispatcher()
 
     arpr[0]
     -> FlowStrip(14)
-//    -> Print("IP")
     -> receivercheck :: CheckIPHeader(CHECKSUM false)
     -> inc :: FlowDispatcher(9/01, 9/06, -)
 
     inc[0]
     -> Print("ICMP")
     -> icmptype :: FlowDispatcher(20/08, -)
-//    -> Print("ICMP echo")
     -> ICMPPingResponder
     -> arpq
 
 
     icmptype[1] -> Print("Unhandled ICMP", -1) -> Discard
 
-    inc[1]
-//    -> Print("TCP", -1)
+    inc[1] //TCP
     -> [0]output;
 
 
-	inc[2]
+	inc[2] //Non TCP or ICMP
     -> Unstrip(14)
-//	-> Print("NON TCP or ICMP",-1)
 	-> Discard
 
     arpr[1]
@@ -306,10 +402,11 @@ elementclass Receiver { $port, $mac, $ip, $range |
 
 
     etherOUT
-//    -> avgIN :: AverageCounter(IGNORE $ignore)
     -> t :: ToDPDKDevice($port,BLOCKING true,BURST $bout, VERBOSE $txverbose)
 }
 
+
+%-ids,-dualsrv:file@dut CONF
 ipOUT :: LookupIPRouteMP($NET1 0,
                     $NET2 1,
                     $HOST 2)
@@ -317,48 +414,84 @@ ipOUT :: LookupIPRouteMP($NET1 0,
 lb :: FlowIPLoadBalancer($SERVERIP1,$SERVERIP2,$SERVERIP3,$SERVERIP4, SIP $SIP1 $SIP2 $SIP3 $SIP4 )
 
 r1 :: Receiver(${dut:0:pci},$MAC1,$IP1,$RANGE1) [0] -> ipOUT
-//r1[1] -> ipOUT
 
 r2 :: Receiver(${dut:1:pci},$MAC2,$IP2,$IP2 $SIP1 $SIP2 $SIP3 $SIP4) [0]
   -> FlowDispatcher(9/06)
   -> FlowDispatcher(20/0050)
-//  -> IPPrint(REVERSELB)
   -> FlowIPLoadBalancerReverse(lb)
-//  -> IPPrint(REVERSELBOUT)
-//  -> CheckIPHeader(CHECKSUM false)
+
+
   -> [0]r1
 
-//r2[1] -> ipOUT
+
 
 ipOUT[0]
-//-> Print("CLIENTS")
+
 -> [0]r1
 
 ipOUT[1]
-//-> Print("SERVER")
+
 -> [0]r2
 
 ipOUT[2]
-//-> Print("HOST", -1)
+
 -> istcp :: FlowDispatcher(9/06, -)
 -> FlowDispatcher(22/0050)
-//-> IPPrint("LB")
+
 -> lb
-//-> IPPrint("LBOUT")
-//->CheckIPHeader(CHECKSUM false)
+
+
 -> [0]r2
 
 istcp[1] -> Print("NON TCP packet to LB !") -> Discard
 
-Script(TYPE ACTIVE,
-                print "Waiting for link initialization...",
-                wait 2s,
-                print "Ready")
+%-ids,dualsrv:file@dut CONF
+ipOUT :: LookupIPRouteMP($NET1 0,
+                    $NET2 1,
+                    $HOST 2)
+
+lb :: FlowIPLoadBalancer($SERVERIP1,$SERVERIP2,$SERVERIP3,$SERVERIP4, $SERVERIP5, $SERVERIP6, $SERVERIP7, $SERVERIP8, SIP $SIP1 $SIP2 $SIP3 $SIP4 $SIP5 $SIP6 $SIP7 $SIP8)
+
+r1 :: Receiver(${dut:0:pci},$MAC1,$IP1,$RANGE1) [0] -> ipOUT
+
+r2 :: Receiver(${dut:1:pci},$MAC2,$IP2,$IP2 $SIP1 $SIP2 $SIP3 $SIP4 $SIP5 $SIP6 $SIP7 $SIP8) [0]
+  -> FlowDispatcher(9/06)
+  -> FlowDispatcher(20/0050)
+  -> FlowIPLoadBalancerReverse(lb)
+
+
+  -> [0]r1
+
+
+
+ipOUT[0]
+
+-> [0]r1
+
+ipOUT[1]
+
+-> [0]r2
+
+ipOUT[2]
+
+-> istcp :: FlowDispatcher(9/06, -)
+-> FlowDispatcher(22/0050)
+
+-> lb
+
+
+-> [0]r2
+
+istcp[1] -> Print("NON TCP packet to LB !") -> Discard
+
+
+%file@dut END
 
 DriverManager(
                 pause,
-                print "Server finished. Waiting for last packets...",
-                wait $(wait),
+                print "Server finished.",
+                print "RESULT-DROPPED $(r1/f.hw_dropped)"
+                print "RESULT-DROPPED $(r2/f.hw_dropped)"
                 print "Rate : ",
                 print "$(r1/avgIN.link_rate)",
                 print "$(r2/avgIN.link_rate)",
@@ -372,6 +505,40 @@ DriverManager(
                 print "$(r1/stats.average) $(r1/stats.median)",
                 print "$(r2/stats.average) $(r2/stats.median)",
                 stop);
+
+%ids:file@dut CONF
+ipOUT :: LookupIPRouteMP($NET1 0,
+                    $NET2 1,
+                    $HOST 2)
+
+r1 :: Receiver(${dut:0:pci},$MAC1,$IP1,$RANGE1) [0] -> ipOUT
+
+r2 :: Receiver(${dut:1:pci},$MAC2,$IP2,$IP2 $SIP1 $SIP2 $SIP3 $SIP4) [0]
+ ~> IPIn
+ ~> tINTX :: TCPReorder
+ -> TCPIn(FLOWDIRECTION 1, OUTNAME tOUTTX, RETURNNAME tINRX,ALLOW_RESIZE false)
+ -> FlowIDSMatcher(attack)
+ -> tOUTTX :: TCPOut(READONLY true)
+ -> IPOut(READONLY true)
+ -> [0]r1
+
+
+ipOUT[0]
+-> [0]r1
+
+ipOUT[1]
+-> [0]r2
+
+ipOUT[2]
+~> IPIn
+~> TCPReorder
+-> tINRX :: TCPIn(FLOWDIRECTION 0,OUTNAME tOUTRX,RETURNNAME tINTX,ALLOW_RESIZE false)
+-> FlowIDSMatcher(attack)
+-> tOUTTX :: TCPOut(READONLY true)
+-> IPOut(READONLY true)
+-> [0]r2
+
+istcp[1] -> Print("NON TCP packet to LB !") -> Discard
 
 //#############################
 %haproxy:init@dut sudo=true delay=1
@@ -389,16 +556,9 @@ echo 1 > /proc/sys/net/ipv4/ip_forward
 1
 sleep 1
 
-ethtool -L $ethA combined $RXQUEUE
-ethtool -L $ethB combined $RXQUEUE
-
 sudo ifconfig $ethA 10.200.0.1 netmask 255.255.0.0
 sudo ifconfig $ethA up
 
-sudo ip addr add 10.200.0.1/24 dev $ethA
-sudo ip addr add 10.200.0.2/24 dev $ethA
-sudo ip addr add 10.200.0.3/24 dev $ethA
-sudo ip addr add 10.200.0.4/24 dev $ethA
 
 sudo ifconfig $ethB 10.100.0.1 netmask 255.255.255.0
 sudo ifconfig $ethB up
@@ -406,10 +566,14 @@ sudo ip addr add 10.100.1.2/24 dev $ethB
 sudo ip addr add 10.100.2.2/24 dev $ethB
 sudo ip addr add 10.100.3.2/24 dev $ethB
 sudo ip addr add 10.100.4.2/24 dev $ethB
+sudo ip addr add 10.100.5.2/24 dev $ethB
+sudo ip addr add 10.100.6.2/24 dev $ethB
+sudo ip addr add 10.100.7.2/24 dev $ethB
+sudo ip addr add 10.100.8.2/24 dev $ethB
 
 echo "RESULT 1"
 
-%haproxy:script@dut sudo=true
+%haproxy:script@dut sudo=true autokill=false
 
 sudo killall -9 haproxy &> /dev/null
 
@@ -423,26 +587,34 @@ sudo killall -9 haproxy &> /dev/null
 #sudo ethtool -K $ethB gso off
 #sudo ethtool -K $ethB gro off
 
+ethtool -L $ethA combined $RXQUEUE
+ethtool -L $ethB combined $RXQUEUE
+
 
 echo "Launching HA"
-if [ "$NC" -eq 1 ] ; then
+#if [ "$NC" -eq 1 ] ; then
     sudo /home/tom/set_irq_affinity.sh $ethA $ethB
-    M="0"
-else
-    M="0,1"
-    sudo /home/tom/set_irq_affinityseq.sh $ethA $ethB
-fi
+#    M="0"
+#else
+#    M="0,1"
+#    sudo /home/tom/set_irq_affinityseq.sh $ethA $ethB
+#fi
 
-taskset -c $M haproxy -db -f haproxy.cfg
-echo "HAProxy finished"
-killall -9 haproxy &> /dev/null
+taskset -c 0-$(( $NC - 1 )) haproxy -f haproxy.cfg
 
-%haproxy:file@dut haproxy.cfg
+%haproxy,-dualsrv:file@dut haproxy.cfg
 global
 	daemon
     nbproc $NC
     maxconn $MAXCONN
-
+    cpu-map 1 0
+    cpu-map 2 1
+    cpu-map 3 2
+    cpu-map 4 3
+    cpu-map 5 4
+    cpu-map 6 5
+    cpu-map 7 6
+    cpu-map 8 7
 
 defaults
 	mode tcp
@@ -462,3 +634,40 @@ backend nodes
     server web1 10.100.2.1
     server web2 10.100.3.1
     server web3 10.100.4.1
+
+%haproxy,dualsrv:file@dut haproxy.cfg
+global
+	daemon
+    nbproc $NC
+    maxconn $MAXCONN
+    cpu-map 1 0
+    cpu-map 2 1
+    cpu-map 3 2
+    cpu-map 4 3
+    cpu-map 5 4
+    cpu-map 6 5
+    cpu-map 7 6
+    cpu-map 8 7
+
+defaults
+	mode tcp
+	timeout connect 5000
+	timeout client  50000
+	timeout server  50000
+    option dontlog-normal
+
+frontend nodes
+	bind *:80
+	default_backend nodes
+
+
+backend nodes
+	balance $BALANCE
+    server web0 10.100.1.1
+    server web1 10.100.2.1
+    server web2 10.100.3.1
+    server web3 10.100.4.1
+    server web4 10.100.5.1
+    server web5 10.100.6.1
+    server web6 10.100.7.1
+    server web7 10.100.8.1

@@ -1,6 +1,6 @@
-parent=fastclick-next
+parent=fastclick
 name=MiddleClick
 tags=click,batch,middleclick,fastclickbased
 url=git@gitlab.run.montefiore.ulg.ac.be:sdn-pp/click.git
 branch=flowclick
-configure+=--enable-flow
+configure+=--enable-flow --enable-user-timestamp

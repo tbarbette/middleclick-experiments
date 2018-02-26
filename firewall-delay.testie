@@ -16,15 +16,19 @@ timeout=30
 //Axis name
 var_names={LENGTH:Length,latency:Latency (µs),result-RXTHROUGHPUT:RX Throughput(GBits/s),TOTALTHROUGHPUT:Total Throughput (GBits/s),TXCPU:Transmit CPU,RXCPU:Receive CPU,CPUFREQ:CPU Frequency (MHz)}
 acceptable=0.01
+results_expect={RXTHROUGHPUT,TOTALTHROUGHPUT}
 n_runs=3
 var_serie=LENGTH
 //var_lim={result-RXTHROUGHPUT:0-30}
 var_divider={result-TOTALTHROUGHPUT:1000000000,result-RXTHROUGHPUT:1000000000,CPUFREQ:1000}
 var_log={result-LATENCY}
-var_unit={latency:us}
+var_unit={LATENCY:us,RXTHROUGHPUT:bps}
 var_format={result:%d}
-var_ticks={result-TOTALTHROUGHPUT:1+2+5+10+20+30+40}
-var_ticks+={result-RXTHROUGHPUT:1+2+5+10+20+30+40}
+//var_ticks={result-TOTALTHROUGHPUT:1+2+5+10+20+30+40}
+//var_ticks+={result-RXTHROUGHPUT:5+10+20+30+40}
+var_lim={RXTHROUGHPUT:0-30,TOTALTHROUGHPUT:0-30}
+//var_log_base={RXTHROUGHPUT}
+
 var_grid={result}
 
 %variables
@@ -158,8 +162,8 @@ sudo ip addr add 139.165.0.1/16 dev $ethB noprefixroute
 
 sleep 1
 echo "Setting MAC entries"
-sudo ip neighbor add 139.164.0.1 lladdr 3c:fd:fe:9e:5b:60 dev $ethA nud permanent
-sudo ip neighbor add 139.165.0.2 lladdr 3c:fd:fe:9e:5b:61 dev $ethB nud permanent
+sudo ip neighbor add 139.164.0.1 lladdr ${client:0:mac} dev $ethA nud permanent
+sudo ip neighbor add 139.165.0.2 lladdr ${client:1:mac} dev $ethB nud permanent
 
 echo "Setting up route in dedicated table"
 sudo ip route flush table 5
@@ -225,7 +229,7 @@ FastUDPFlows(RATE 1, LIMIT -1, LENGTH 60, SRCETH $OUTsrcmac, DSTETH ff:ff:ff:ff:
 
 
 DriverManager(  pause,
-    print "Count : $(avgIN.count)/$(fdIN/f.count) $(avgOUT.count)/$(fdOUT/f.count)",
+    print "Count : $(avgIN.count)/sw$(fdIN/f.count)/hw$(fdIN/f.hw_count) $(avgOUT.count)/$(fdOUT/f.count)",
     print "Receive rate : $(avgIN.link_rate) $(avgOUT.link_rate)",
     print "Dropped : $(dropIN.count) $(dropOUT.count)",
 

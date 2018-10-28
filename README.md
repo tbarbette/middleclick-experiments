@@ -1,0 +1,2 @@
+# middleclick-config
+

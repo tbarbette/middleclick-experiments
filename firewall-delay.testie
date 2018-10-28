@@ -14,7 +14,7 @@ title=L3 Firewall
 timeout=30
 
 //Axis name
-var_names={LENGTH:Length,latency:Latency (µs),result-RXTHROUGHPUT:RX Throughput(GBits/s),TOTALTHROUGHPUT:Total Throughput (GBits/s),TXCPU:Transmit CPU,RXCPU:Receive CPU,CPUFREQ:CPU Frequency (MHz)}
+var_names={LENGTH:Length,latency:Latency (µs),result-RXTHROUGHPUT:RX Throughput(Gbits/s),TOTALTHROUGHPUT:Total Throughput (Gbits/s),TXCPU:Transmit CPU,RXCPU:Receive CPU,CPUFREQ:CPU Frequency (MHz)}
 acceptable=0.01
 results_expect={RXTHROUGHPUT,TOTALTHROUGHPUT}
 n_runs=3
@@ -33,24 +33,33 @@ var_grid={result}
 
 %variables
 GEN_ENDAFTER=32
+PKTGEN_REPLAY_COUNT=10
 
 full:BLOCKING={true,false}
 BLOCKING=false
 iptables:BLOCKING=false
+
 
 cpufreq:CPUFREQ={1200000, 1400000, 1600000, 1800000, 2000000, 2200000, 2400000}
 -cpufreq:CPUFREQ=1200000
 CPU=2
 middleclick:AGGCACHE=true
 middleclick:BUILDER=1
-middleclick:CACHESIZE=65536
+//middleclick:CACHESIZE=65536
+middleclick:CACHESIZE=0
 middleclick:CACHERINGSIZE=8
 
 checksum=true
 
 tunemiddle:BUILDER={0,1}
 tunemiddle:AGGCACHE={true,false}
+tunemiddle:CACHESIZE={0,65536}
+tunemiddle:nq={-1,16}
 //DIRECTION={0,1}
+
+
+%late_variables
+-tunemiddle:nq=-1
 
 //########################################
 //Script to launch the generator
@@ -137,7 +146,7 @@ echo "Launching DUT"
 cat COMMON_CONFIG FIREWALL_CONFIG CLICK_END_CONFIG COMMON_END_CONFIG | click --dpdk -n 4 -l 2-$(( 2 + $CPU - 1 )) --
 
 //############################
-%fastclickbased:script@dut sudo=true
+%fastclickbased:script@dut sudo=true critical=true
 echo "Fastclick based script"
 echo "Launching DUT"
 cat COMMON_CONFIG FIREWALL_CONFIG CLICK_END_CONFIG COMMON_END_CONFIG | click --dpdk -n 4 -l 0-$(( $CPU - 1 )) --
@@ -264,15 +273,15 @@ chOUT[1] -> Print("Bad IP") -> Discard
 //############################
 %vanilla:file FIREWALL_CONFIG
 
-fdIN :: { FromDevice($INETH, METHOD PCAP) -> [0] }
+fdIN :: { FromDevice($INETH, METHOD PCAP, SNIFFER false) -> [0] }
 tdIN :: EtherRewrite($INsrcmac, $GWINmac)
--> tIN :: Queue -> ToDevice($INETH, METHOD PCAP)
-fdOUT ::{ FromDevice($OUTETH) -> [0] }
+-> tIN :: Queue -> toDIN :: ToDevice($INETH, METHOD PCAP)
+fdOUT ::{ FromDevice($OUTETH, METHOD PCAP, SNIFFER false) -> [0] }
 tdOUT :: EtherRewrite($OUTsrcmac, $GWOUTmac)
--> tOUT :: Queue -> ToDevice($OUTETH, METHOD PCAP)
+-> tOUT :: Queue -> toDOUT:: ToDevice($OUTETH, METHOD PCAP)
 
-StaticThreadSched(fdIN 0 , tdIN 0)
-StaticThreadSched(fdOUT 1,  tdOUT 1)
+StaticThreadSched(fdIN 0 , tIN 0, tdIN 0, toDIN 0)
+StaticThreadSched(fdOUT 1,  tOUT 1, tdOUT 1, toDOUT 1)
 
 /**
  * Output 0 : IP
@@ -345,12 +354,12 @@ JiffieClock();
 
 define($aggcache $AGGCACHE)
 define($builder $BUILDER)
-fdIN :: { f :: FromDPDKDevice($IN, VERBOSE 99, RSS_AGGREGATE $aggcache) -> MarkMACHeader -> [0] }
+fdIN :: { f :: FromDPDKDevice($IN, VERBOSE 99, RSS_AGGREGATE $aggcache, N_QUEUES $nq) -> MarkMACHeader -> [0] }
 tdIN :: FlowUnstrip(14) -> EtherRewrite($INsrcmac, $GWINmac)
--> tIN :: ToDPDKDevice($IN, VERBOSE 99)
-fdOUT ::{ f :: FromDPDKDevice($OUT, VERBOSE 99, RSS_AGGREGATE $aggcache) -> MarkMACHeader -> [0] }
+-> tIN :: ToDPDKDevice($IN, VERBOSE 99, BLOCKING $BLOCKING)
+fdOUT ::{ f :: FromDPDKDevice($OUT, VERBOSE 99, RSS_AGGREGATE $aggcache, N_QUEUES $nq) -> MarkMACHeader -> [0] }
 tdOUT :: FlowUnstrip(14) -> EtherRewrite($OUTsrcmac, $GWOUTmac)
--> tOUT :: ToDPDKDevice($OUT, VERBOSE 99)
+-> tOUT :: ToDPDKDevice($OUT, VERBOSE 99, BLOCKING $BLOCKING)
 
 /**
  * Output 0 : IP
@@ -366,29 +375,23 @@ elementclass ARPDispatcher {
 
 dispIN :: ARPDispatcher
 dispOUT :: ARPDispatcher
-
-elementclass FwIN { input -> proto :: FlowDispatcher(   12/8ba5/ffff drop, //Drop internalnet source
-				                    9/01 0, //ICMP
-                                    9/06 1, //TCP
-                                    9/11 2, //UDP
-	                            - drop)
-		proto[0] -> [0]output
-
-        proto[1] -> FlowStrip(20) -> FlowDispatcher(0/01bb 0,
-                                                    0/0016 0,
-                                                    0/0015 0,
-                                                    0/0050 0,
-													2/0050 0,
-                                                    2/01bb 0,
-													2/0016 0,
-                                                    2/0015 0,
-                                                    - drop) -> FlowUnstrip(20) -> [0]output
-        proto[2] -> FlowStrip(20) -> FlowDispatcher(0/0035 0,
-                                                    2/0035 0,
-                                                    - drop) -> FlowUnstrip(20) -> [0]output
+elementclass FwIN { input ->
+                FlowDispatcher(
+                                12/8ba5/ffff drop, //Drop internalnet source
+                                9/01 9,
+                                9/06 20/01bb 0,
+                                9/06 20/0016 0,
+                                 9/06                    20/0015 0,
+                                      9/06               20/0050 0,
+												 9/06	22/0050 0,
+                                           9/06          22/01bb 0,
+	 9/06												22/0016 0,
+          9/06                                           22/0015 0,
+       9/17 20/0035 0,
+       9/17                        22/0035 0,
+                                                    - drop) ->  [0]output
             }
 fwIN :: FwIN()
-
 
 fwOUT::FlowDispatcher(	12/8ba5/ffff 0,
 						9/01 0,
@@ -402,11 +405,11 @@ router[0] -> tdIN
 router[1] -> tdOUT
 
 
-fdIN -> fcIN :: FlowClassifier(VERBOSE 0, BUILDER $builder, AGGCACHE $aggcache, CACHESIZE $CACHESIZE, CACHERINGSIZE $CACHERINGSIZE) -> dispIN [0] -> FlowStrip(14) -> chIN :: CheckIPHeader(CHECKSUM $checksum) -> fwIN [0] -> avgIN :: AverageCounter() ->  router
+fdIN -> fcIN :: FlowClassifier(VERBOSE 1, BUILDER $builder, AGGCACHE $aggcache, CACHESIZE $CACHESIZE, CACHERINGSIZE $CACHERINGSIZE) -> dispIN [0] -> FlowStrip(14) -> chIN :: CheckIPHeader(CHECKSUM $checksum) -> fwIN [0] -> avgIN :: AverageCounter() ->  router
 dispIN[1] -> Print("Pass through") -> Discard
 dispIN[2] -> Print("UNKNOWN INPUT TRAFFIC") -> Discard()
 
-fdOUT -> fcOUT :: FlowClassifier(VERBOSE 0, BUILDER $builder, AGGCACHE $aggcache, CACHESIZE $CACHESIZE, CACHERINGSIZE $CACHERINGSIZE) -> dispOUT[0] -> FlowStrip(14) -> chOUT :: CheckIPHeader(CHECKSUM $checksum) -> fwOUT [0] -> avgOUT :: AverageCounter() ->  router
+fdOUT -> fcOUT :: FlowClassifier(VERBOSE 1, BUILDER $builder, AGGCACHE $aggcache, CACHESIZE $CACHESIZE, CACHERINGSIZE $CACHERINGSIZE) -> dispOUT[0] -> FlowStrip(14) -> chOUT :: CheckIPHeader(CHECKSUM $checksum) -> fwOUT [0] -> avgOUT :: AverageCounter() ->  router
 dispOUT[1] -> Print("Pass through") -> Discard
 dispOUT[2] -> Print("UNKNOWN OUTPUT TRAFFIC") -> Discard()
 

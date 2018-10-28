@@ -10,41 +10,48 @@ will use 4 ips as source (10.200.[1-4].5) to send the requests to the HTTP serve
 
 %config
 timeout=60
-var_names={LENGTH:Length,result-THROUGHPUT:Throughput,TXCPU:Transmit CPU,RXCPU:Receive CPU,FREQ:CPU frequency,C:Concurrent connections,BUILDER:Reconstruct batches of Flows,result-LATENCY:Average file download time,result-Receive rate:Receive rate,FSIZE:File size,NC:Number of cores,result-REQUEST:Requests rate,CPU:Number of cores}
+var_names={LENGTH:Length,result-THROUGHPUT:HTTP Throughput,TXCPU:Transmit CPU,RXCPU:Receive CPU,FREQ:CPU frequency,C:Concurrent connections,BUILDER:Reconstruct batches of Flows,result-LATENCY:Average file download time,result-Receive rate:Receive rate,FSIZE:File size,NC:Number of cores,result-REQUEST:Requests rate,CPU:Number of cores,LINK:Throughput,GEN_RATE:Request rate (KRequests/s)}
+tight:var_names+={result-LATENCY:Avg download time}
 n_retry=0
 acceptable=0.01
 n_runs=3
+accept_zero={DROPPED}
 tunehaproxy:n_runs=1
 tunemiddle:n_runs=1
 var_serie=LENGTH
 -cpu:var_log={FSIZE,result-LATENCY,result-Receive rate}
--cpu:var_log_base={result-THROUGHPUT:2}
-var_unit={result: ,result-LATENCY:ms,FSIZE:kbyte,result-THROUGHPUT:GBits/s,result-PPS:KPackets/s,REQUEST:Request/s}
-var_divider={result-THROUGHPUT:125000000,result-LINK:1000000000,result-LATENCY:0.001,result-PPS:1000} //Throughput is brought back to bits
+-separate,-cpu:var_log_base={result-THROUGHPUT:2}
+var_unit={result: ,result-LATENCY:ms,FSIZE:kbyte,result-THROUGHPUT:Gbits/s,result-PPS:KPackets/s,result-REQUEST:Request/s,LINK:Gbits/s}
+var_divider={result-THROUGHPUT:125000000,result-LINK:1000000000,result-LATENCY:0.001,result-PPS:1000,GEN_RATE:1000} //Throughput is brought back to bits
 var_format={result:%d,result-LATENCY:%d}
 var_grid={result-LATENCY,result-THROUGHPUT}
+var_log+={LATENCY,GEN_RATE}
 -cpu:var_lim={result-THROUGHPUT:0-40}
 cpu:var_lim={result-PPS:0-1000,result-THROUGHPUT:0-10,result-REQUEST:0-1000000}
--cpu:var_ticks={result-THROUGHPUT:0+1+2+4+10+20+40}
+-separate,-cpu:var_ticks={result-THROUGHPUT:0+1+2+4+10+20+40}
 //graph_result_as_variables={LINK+THROUGHPUT:Receive rate}
 //graph_variable_as_series={Receive rate}
 //graph_combine_results={LINK+THROUGHPUT:Link rate+Payload rate}
-graph_subplot_result={THROUGHPUT+PPS:rate}
-cpu:graph_subplot_result={THROUGHPUT+REQUEST:rate}
+-separate:graph_subplot_result={LINK+REQUEST:rate}
+-separate,cpu:graph_subplot_result={THROUGHPUT+REQUEST:rate}
 graph_subplot_type=axis
+//wrkrate:var_log+={THROUGHPUT}
+wrkrate:var_ticks+={THROUGHPUT:0+1+2+3+4+5+6,GEN_RATE:8+32+128+512+2048}
+
 %variables
 BLOCKING=false
 FREQ=2400000
 none:PATH=
 C=[1*128]
 C=128
-FSIZE=[0*1048576]
+FSIZE=[0*262144]
+//FSIZE=[0*1048576]
 
 th=4
 full:th=[1*16]
 
 NC=1
-cpu:NC=[1*8]
+cpu:NC=[1-8]
 cpu:FSIZE=1
 dualsrv:GEN_CONCURRENT=1024 //1024 is now the better with dualsrv
 dualsrv,direct:GEN_CONCURRENT=256
@@ -57,7 +64,9 @@ CACHESIZE=65536
 NODUT=0
 NGINX_ROOT=/tmp/nginx/
 NGINX_PORT=80
-GEN_TIME=5
+GEN_TIME=10
+wrkrate:GEN_RATE=[8000*2048000]
+wrkrate:FSIZE=1
 
 tunemiddle:BUILDER={0,1}
 tunemiddle:AGGCACHE={0,1}
@@ -72,8 +81,12 @@ tunehaproxy:MAXCONN={1024,32768,200000,4000000}
 tunehaproxy:SOMAXCONN={200000,400000}
 tunehaproxy:BALANCE={roundrobin,static-rr}
 tunehaproxy:FSIZE={8,32,1024}
+nginxlb:LB=NGINX
+
+
 %late_variables
 tunehaproxy:SYNBACKLOG=EXPAND( $SOMAXCONN )
+wait:GEN_TIME=60
 
 
 %middleclick:require
@@ -117,7 +130,7 @@ echo "RESULT 1"
 %require
 test $C -ge $th
 
-%-webgen,-wrk:require
+%-webgen,-wrk,-wrkrate:require
 echo "You must provide a generator method !"
 exit 1
 
@@ -132,17 +145,28 @@ FILE_PATH=EXPAND(bin-${FSIZE}K)
 %dualsrv:import@server2 nginx
 
 //WRK gen method
-%-direct,wrk:import@client wrk HTTP_PORT=80 delay=15 WRK_HOST=10.200.0.1
-%-direct,dualclient,wrk:import@client2 wrk HTTP_PORT=80 delay=15 WRK_HOST=10.200.0.1
+%-direct,wrk:import@client wrk HTTP_PORT=80 delay=10 WRK_HOST=10.200.0.1
+%-direct,wrkrate:import@client wrk2 HTTP_PORT=80 delay=10 WRK_HOST=10.200.0.1
+%-direct,dualclient,wrk:import@client2 wrk HTTP_PORT=80 delay=10 WRK_HOST=10.200.0.1
 
 //**
 //* DIRECT mode
 //
-%direct:script@client sudo=true autokill=false
+
+%direct:init@dut sudo=true autokill=false title=DirectDisable
+ifconfig ${dut:0:ifname} down
+ifconfig ${dut:1:ifname} down
+echo "RESULT 1"
+exit 0
+
+%direct:script@client sudo=true autokill=false title=DirectSetup
+sudo ip addr add 10.100.0.5/24 dev ${self:0:ifname}
 sudo ip addr add 10.100.1.5/24 dev ${self:0:ifname}
 sudo ip addr add 10.100.2.5/24 dev ${self:0:ifname}
 sudo ip addr add 10.100.3.5/24 dev ${self:0:ifname}
 sudo ip addr add 10.100.4.5/24 dev ${self:0:ifname}
+
+exit 0
 
 %direct,dualclient:script@client2 sudo=true autokill=false
 sudo ip addr add 10.100.5.5/24 dev ${self:0:ifname}
@@ -150,6 +174,7 @@ sudo ip addr add 10.100.6.5/24 dev ${self:0:ifname}
 sudo ip addr add 10.100.7.5/24 dev ${self:0:ifname}
 sudo ip addr add 10.100.8.5/24 dev ${self:0:ifname}
 
+%direct,wrkrate:import@client wrk2 HTTP_PORT=80 delay=10 WRK_HOST=10.100.0.1
 %direct,wrk:import@client wrk WRK_HOST=10.100.1.1 GEN_THREADS=4 delay=10
 %direct,wrk:import@client wrk WRK_HOST=10.100.2.1 GEN_THREADS=4 delay=10
 %direct,wrk:import@client wrk WRK_HOST=10.100.3.1 GEN_THREADS=4 delay=10
@@ -199,7 +224,7 @@ DriverManager(
 %wrk:import@client dpdk-bind DRIVER=i40e NIC=0
 %wrk,dualclient:import@client2 dpdk-bind DRIVER=i40e NIC=0
 %webgen:import@client dpdk-bind NIC=0
-%-quadsrv:import@server dpdk-bind DRIVER=i40e NIC=1
+%-quadsrv:import@server dpdk-bind DRIVER=i40e NIC=0
 
 %quadsrv:import@server dpdk-bind DRIVER=i40e NIC=0
 %quadsrv:import@server dpdk-bind DRIVER=i40e NIC=1
@@ -209,25 +234,30 @@ DriverManager(
 %quadsrv,dualsrv:import@server2 dpdk-bind DRIVER=i40e NIC=1
 %quadsrv,dualsrv:import@server2 dpdk-bind DRIVER=i40e NIC=2
 %quadsrv,dualsrv:import@server2 dpdk-bind DRIVER=i40e NIC=3
-%haproxy:import@dut dpdk-bind DRIVER=i40e NIC=0
-%haproxy:import@dut dpdk-bind DRIVER=i40e NIC=1 delay=1
+%haproxy|nginxlb:import@dut dpdk-bind DRIVER=i40e NIC=0
+%haproxy|nginxlb:import@dut dpdk-bind DRIVER=i40e NIC=1 delay=1
 %middleclick:import@dut dpdk-bind NIC=0
 %middleclick:import@dut dpdk-bind NIC=1 delay=1
 
 
 //Common ips for dut
-%-direct:script@dut autokill=false 0:ip=10.200.0.1 1:ip=10.100.1.1
+%-direct:script@dut autokill=false 0:ip=10.200.0.1 1:ip=10.100.0.2
+%-direct,-middleclick:script@dut autokill=false
+sudo ifconfig ${dut:0:ifname} promisc
+sudo ifconfig ${dut:1:ifname} promisc
+
 
 //Quadsrv is used when the server is another computer with 4 links, and not client taking two roles
-%-quadsrv:init@server sudo=true autokill=false 1:ip=10.100.1.2 delay=2
+%-quadsrv:init@server sudo=true autokill=false 0:ip=10.100.0.1 delay=2
 sudo sysctl -w net.core.somaxconn=262144
 sudo sysctl -w net.ipv4.tcp_max_syn_backlog=3240000
-sudo ifconfig ${server:1:ifname} ${server:1:ip} netmask 255.255.255.0
-sudo ifconfig ${server:1:ifname} up
-sudo ip addr add 10.100.1.1/24 dev ${server:1:ifname}
-sudo ip addr add 10.100.2.1/24 dev ${server:1:ifname}
-sudo ip addr add 10.100.3.1/24 dev ${server:1:ifname}
-sudo ip addr add 10.100.4.1/24 dev ${server:1:ifname}
+sudo ifconfig ${server:0:ifname} ${server:0:ip} netmask 255.255.255.0
+sudo ifconfig ${server:0:ifname} up
+sudo ifconfig ${server:0:ifname} promisc
+sudo ip addr add 10.100.1.1/24 dev ${server:0:ifname}
+sudo ip addr add 10.100.2.1/24 dev ${server:0:ifname}
+sudo ip addr add 10.100.3.1/24 dev ${server:0:ifname}
+sudo ip addr add 10.100.4.1/24 dev ${server:0:ifname}
 sudo iptables -X
 sudo iptables -F
 sudo iptables -F -t nat
@@ -300,7 +330,7 @@ echo "RESULT 1"
 
 
 //#############################
-%middleclick:script@dut sudo=true  0:ip=10.200.0.1 1:ip=10.100.1.1 delay=2
+%middleclick:script@dut sudo=true  0:ip=10.200.0.1 1:ip=10.100.0.2 delay=2
 cat COMMON CONF END | click --dpdk -n 4 -l 0-$(( $NC -1 )) -- BUILDER=$BUILDER AGGCACHE=$AGGCACHE CACHESIZE=$CACHESIZE
 
 %file@dut COMMON
@@ -310,7 +340,7 @@ define($NET1  10.200.0.0/16)
 define($RANGE1  10.200.0.0/30)
 define($HOST $RANGE1)
 
-define($IP2 10.100.0.1)
+define($IP2 10.100.0.2)
 define($MAC2 ${dut:1:mac})
 define($NET2  10.100.0.0/16)
 
@@ -360,7 +390,7 @@ elementclass Receiver { $port, $mac, $ip, $range |
     -> arpq :: ARPQuerier($ip, $mac)
     -> etherOUT :: Null
 
-    f :: FromDPDKDevice($port, VERBOSE $rxverbose, PROMISC false, RSS_AGGREGATE $AGGCACHE)
+    f :: FromDPDKDevice($port, VERBOSE $rxverbose, PROMISC false, RSS_AGGREGATE $AGGCACHE, THREADOFFSET 0, MAXTHREADS $NC)
     -> FlowClassifier(BUILDER $BUILDER, AGGCACHE $AGGCACHE, CACHESIZE $CACHESIZE,VERBOSE 0)
     -> arpr :: ARPDispatcher()
 
@@ -541,26 +571,27 @@ ipOUT[2]
 istcp[1] -> Print("NON TCP packet to LB !") -> Discard
 
 //#############################
-%haproxy:init@dut sudo=true delay=1
+%haproxy|nginxlb:init@dut sudo=true
 sudo sysctl -w net.core.somaxconn=$SOMAXCONN
 sudo sysctl -w net.ipv4.tcp_max_syn_backlog=$SYNBACKLOG
 
 sudo service fail2ban stop
 
+sudo killall -9 haproxy &> /dev/null
+sudo killall -9 nginx &> /dev/null
 
 RXQUEUE=$NC
 ethA=${dut:0:ifname}
 ethB=${dut:1:ifname}
 
 echo 1 > /proc/sys/net/ipv4/ip_forward
-1
 sleep 1
 
 sudo ifconfig $ethA 10.200.0.1 netmask 255.255.0.0
 sudo ifconfig $ethA up
 
 
-sudo ifconfig $ethB 10.100.0.1 netmask 255.255.255.0
+sudo ifconfig $ethB 10.100.0.2 netmask 255.255.255.0
 sudo ifconfig $ethB up
 sudo ip addr add 10.100.1.2/24 dev $ethB
 sudo ip addr add 10.100.2.2/24 dev $ethB
@@ -593,7 +624,7 @@ ethtool -L $ethB combined $RXQUEUE
 
 echo "Launching HA"
 #if [ "$NC" -eq 1 ] ; then
-    sudo /home/tom/set_irq_affinity.sh $ethA $ethB
+    sudo /home/tom/nas/set_irq_affinity.sh $ethA $ethB
 #    M="0"
 #else
 #    M="0,1"
@@ -671,3 +702,85 @@ backend nodes
     server web5 10.100.6.1
     server web6 10.100.7.1
     server web7 10.100.8.1
+
+
+//*************
+// NGINX as LB
+//*************
+%nginxlb:script@dut sudo=true autokill=false title=LaunchNGINXLB delay=2
+
+sudo killall -9 haproxy &> /dev/null
+sudo killall -9 nginx &> /dev/null
+
+ethtool -L $ethA combined $RXQUEUE
+ethtool -L $ethB combined $RXQUEUE
+
+echo "Launching HA"
+sudo /home/tom/set_irq_affinity.sh $ethA $ethB
+
+sudo nginx -c nginxlb.conf -p $(pwd)
+
+exit 0
+
+%file@dut nginxlb.conf
+user www-data;
+worker_processes $NC;
+pid nginxlb.pid;
+daemon off;
+
+events {
+    worker_connections 200000;
+    use epoll;
+    multi_accept on;
+}
+
+http {
+
+    ##
+    # Basic Settings
+    ##
+
+    sendfile on;
+    tcp_nopush on;
+    tcp_nodelay on;
+    keepalive_timeout 30;
+    types_hash_max_size 2048;
+	upstream myapp1 {
+	    server 10.100.1.1;
+	    server 10.100.2.1;
+	    server 10.100.3.1;
+	    server 10.100.4.1;
+    }
+
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+
+    access_log /dev/null;
+    error_log /dev/stdout;
+
+    gzip off;
+    gzip_disable "msie6";
+
+	client_body_buffer_size      128k;
+	client_max_body_size         10m;
+	client_header_buffer_size    1k;
+	large_client_header_buffers  4 4k;
+	output_buffers               1 32k;
+	postpone_output              1460;
+
+	open_file_cache max=200000 inactive=20s;
+	open_file_cache_valid 120s;
+	open_file_cache_min_uses 1;
+	open_file_cache_errors on;
+
+	server {
+
+		listen 80 default_server;
+		listen [::]:80 default_server;
+
+		location / {
+			proxy_pass http://myapp1;
+		}
+	}
+}

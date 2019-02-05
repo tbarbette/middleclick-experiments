@@ -1,0 +1,12 @@
+#motivation
+./npf-compare.py local:Forward local+nat:+NAT local+nat,haproxy:+HAProxy local+nat,snort,haproxy:+Snort local+nat,snort,squid,haproxy:+Squid --testie ~/workspace/middleclick-config/fullchain.conf --cluster dut=nslrack08-100G,nic=0+3 server=nslrack05-100G,nic=1 client=nslrack12-100G,nic=0 --tags nobind --variables FSIZE=8 GEN_CONCURRENT=128 --tags motivation --graph-size 6 2.5 --output --graph-filename ~/workspace/middleclick-paper/figs/motivation/fnt.pdf
+
+#Motivation - profiling
+taskset --cpu-list 15 ./npf-compare.py local+nat,haproxy,pipeline,PERF_CPU=2:+HAProxy local+nat,haproxy,snort,pipeline,PERF_CPU=3:+Snort local+nat,haproxy,snort,squid,pipeline,PERF_CPU=4:+Squid --testie ~/workspace/middleclick-config/fullchain.conf --cluster dut=nslrack11-100G,nic=1+0 server=nslrack05-100G,nic=1 client=nslrack12-100G,nic=0 --tags nobind --variables FSIZE=8 GEN_CONCURRENT=128 --tags motivation --graph-size 6 2.5 --graph-filename ~/workspace/middleclick-paper/figs/motivation/fnt-pipeline-profile.pdf --tags perf --show-full --show-cmd --config n_runs=1 --variables "PERF_CLASS_MAP=../libs/perf/kernel.map ../libs/perf/kernel_flow.map ../libs/perf/haproxy.map ../libs/perf/snort.map ../libs/perf/squid.map"
+
+#Figure not published, FWD, NAT, NAT+LB and IDS in Linux vs FastClick vs MiddleClick
+./npf-compare.py local:Linux local+nat:Linux local+nat,haproxy:Linux local+nat,haproxy,snort:Linux fastclick:FastClick fastclick+nat:FastClick fastclick+nat,lb:FastClick middleclick-dev:MiddleClick middleclick-dev+nat:MiddleClick middleclick-dev+nat,lb:MiddleClick middleclick-dev+nat,lb,tcp,ids:MiddleClick --testie ~/workspace/middleclick-config/fullchain.conf --cluster dut=nslrack11-100G,nic=1+0 server=nslrack05-100G,nic=1 client=nslrack12-100G,nic=0 --tags nobind --variables FSIZE=8 GEN_CONCURRENT=128 --config n_runs=1 --show-full --show-cmd
+
+
+#Traffic class -firewall
+./npf-compare.py "fastclick+dpdk:FastClick" "fastclick+dpdk,nodrop:FastClick" "middleclick-static+dpdk,middleclick:MiddleClick" "middleclick-static+dpdk,middleclick,nodrop:MiddleClick" "middleclick-static+dpdk,middleclick,hw:MiddleClick-HW" "middleclick-static+dpdk,hw,middleclick,nodrop:MiddleClick-HW" --testie ~/workspace/middleclick-config/firewall-delay-single.testie --cluster dut=nslrack11-100G,nic=1+0 client=nslrack12-100G,nic=0 --tags nobind --config n_runs=3 --no-conntest --variables checksum=true --show-full --tags matchall --graph-size 5 2.1 --output --graph-filename ~/workspace/middleclick-paper/figs/firewall/firewall-delay-single.pdf --tags paper

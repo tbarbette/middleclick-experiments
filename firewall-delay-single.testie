@@ -33,7 +33,7 @@ paper:graph_color={4,5,5}
 paper:graph_show_values=1
 paper:legend_loc=outer center
 paper:legend_ncol=3
-paper:var_lim={THROUGHPUT:0-90}
+paper:var_lim={THROUGHPUT:0-100}
 
 perf:var_serie=Perf
 perf:graph_bar_stack=True
